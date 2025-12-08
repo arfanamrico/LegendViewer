@@ -1,0 +1,9 @@
+[general]
+name=LegendViewer
+description=Menampilkan legend layer dalam GUI non-modal
+version=1.0
+qgisMinimumVersion=3.0
+author=Arfan Amrico
+email=arfanamrico@gmail.com
+icon=icon.png
+
