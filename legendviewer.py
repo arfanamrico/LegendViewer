@@ -1,277 +1,399 @@
 # -*- coding: utf-8 -*-
-from qgis.PyQt.QtWidgets import QAction, QDialog, QLabel, QVBoxLayout, QHBoxLayout
+from qgis.PyQt.QtWidgets import (
+    QAction,
+    QWidget,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QHBoxLayout,
+    QListWidget,
+    QListWidgetItem
+)
 from qgis.PyQt.QtGui import QIcon, QPixmap
-from qgis.PyQt.QtCore import Qt, QSize
-from qgis.core import QgsProject, QgsFeatureRequest
+from qgis.PyQt.QtCore import Qt, QSize, QPoint
+from qgis.core import QgsFeatureRequest
 import os
 
 
-class LegendDialog(QDialog):
-    def __init__(self, layer, parent=None):
+# ==========================================================
+# LEGEND OVERLAY
+# ==========================================================
+class LegendOverlay(QWidget):
+
+    def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.setWindowTitle(f"Legend: {layer.name()}")
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
-        self.resize(300, 380)
+        self.dragPos = QPoint()
+        self.resizing = False
+        self.resize_start_pos = QPoint()
+        self.resize_start_size = self.size()
 
-        self.layer = layer
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_StyledBackground, True)
 
+        self.setStyleSheet("""
+            QWidget{
+                background:white;
+                border:1px solid gray;
+                border-radius:6px;
+            }
+        """)
+
+        self.resize(300, 400)
+        self.setMinimumSize(180, 150)
+
+        # =========================
+        # MAIN
+        # =========================
         self.layout_main = QVBoxLayout(self)
+        self.layout_main.setContentsMargins(4,4,4,4)
         self.layout_main.setSpacing(2)
-        self.layout_main.setContentsMargins(6, 6, 6, 6)
 
-        # Layer title
-        self.label_title = QLabel(layer.name())
-        self.label_title.setStyleSheet("font-size: 13px; font-weight: 600; margin-bottom: 6px;")
-        self.layout_main.addWidget(self.label_title)
+        # =========================
+        # HEADER
+        # =========================
+        self.header = QWidget()
+        self.header.setStyleSheet("""
+            background:#dfe6e9;
+            border-radius:4px;
+        """)
 
-        # Container for legend rows
-        self.legend_container = QVBoxLayout()
-        self.legend_container.setSpacing(0)
-        self.legend_container.setContentsMargins(0, 0, 0, 0)
-        self.layout_main.addLayout(self.legend_container)
+        h = QHBoxLayout(self.header)
+        h.setContentsMargins(6,4,4,4)
 
-        self.update_legend(layer)
+        self.label_title = QLabel("Legend Viewer")
+        self.label_title.setStyleSheet("""
+            QLabel{
+                border:none;
+                background:transparent;
+                font-weight:bold;
+                font-size:13px;
+            }
+        """)
 
-    def clear_layout(self, layout):
-        while layout.count():
-            item = layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-            elif item.layout():
-                self.clear_layout(item.layout())
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setFixedSize(20,20)
+        self.btn_close.setStyleSheet("""
+            QPushButton{
+                background:#e74c3c;
+                color:white;
+                border:none;
+                border-radius:3px;
+                font-weight:bold;
+            }
+            QPushButton:hover{
+                background:#c0392b;
+            }
+        """)
+        self.btn_close.clicked.connect(self.close)
 
-    def _get_renderer_categories(self, renderer):
-        return renderer.categories() if hasattr(renderer, "categories") else []
+        h.addWidget(self.label_title)
+        h.addStretch()
+        h.addWidget(self.btn_close)
 
-    def _get_renderer_ranges(self, renderer):
-        return renderer.ranges() if hasattr(renderer, "ranges") else []
+        self.layout_main.addWidget(self.header)
 
-    def _get_rule_children(self, renderer):
-        try:
-            root = renderer.rootRule()
-            return root.children() if root is not None else []
-        except Exception:
-            return []
+        # =========================
+        # LIST
+        # =========================
+        self.list_widget = QListWidget()
+        self.list_widget.setStyleSheet("""
+            QListWidget{
+                border:none;
+                background:white;
+            }
+            QListWidget::item{
+                height:24px;
+                padding-left:4px;
+            }
+        """)
+        self.layout_main.addWidget(self.list_widget)
 
-    def _range_bounds(self, r):
-        """
-        Return (low, high) for a renderer range object, trying known attribute names.
-        """
-        # try common API names in different QGIS versions
-        for low_name in ("lowerValue", "lowerBound", "minimumValue"):
-            low = getattr(r, low_name, None)
-            if callable(low):
-                low = low()
-            if low is not None:
-                break
-        else:
-            low = None
+        # =========================
+        # RESIZE HANDLE
+        # =========================
+        b = QHBoxLayout()
+        b.addStretch()
 
-        for high_name in ("upperValue", "upperBound", "maximumValue"):
-            high = getattr(r, high_name, None)
-            if callable(high):
-                high = high()
-            if high is not None:
-                break
-        else:
-            high = None
+        self.resize_handle = QLabel("◢")
+        self.resize_handle.setFixedSize(18,18)
+        self.resize_handle.setAlignment(Qt.AlignCenter)
+        self.resize_handle.setCursor(Qt.SizeFDiagCursor)
+        self.resize_handle.setStyleSheet("""
+            QLabel{
+                border:none;
+                color:gray;
+                font-size:14px;
+            }
+        """)
 
-        return low, high
+        b.addWidget(self.resize_handle)
+        self.layout_main.addLayout(b)
 
-    def update_legend(self, layer=None):
-        if layer is None:
-            layer = self.layer
-        if layer is None:
+    # ======================================================
+    # DRAG / RESIZE
+    # ======================================================
+    def mousePressEvent(self, event):
+
+        if event.button() == Qt.LeftButton:
+
+            if self.resize_handle.geometry().contains(event.pos()):
+                self.resizing = True
+                self.resize_start_pos = event.globalPos()
+                self.resize_start_size = self.size()
+                event.accept()
+                return
+
+            if self.header.geometry().contains(event.pos()):
+                self.dragPos = event.globalPos() - self.frameGeometry().topLeft()
+                event.accept()
+
+    def mouseMoveEvent(self, event):
+
+        if not (event.buttons() & Qt.LeftButton):
             return
 
-        self.layer = layer
-        self.label_title.setText(layer.name())
+        # resize
+        if self.resizing:
 
-        renderer = layer.renderer()
-        if not renderer:
-            self.clear_layout(self.legend_container)
+            delta = event.globalPos() - self.resize_start_pos
+
+            new_w = max(
+                self.minimumWidth(),
+                self.resize_start_size.width() + delta.x()
+            )
+
+            new_h = max(
+                self.minimumHeight(),
+                self.resize_start_size.height() + delta.y()
+            )
+
+            parent_rect = self.parent().rect()
+
+            new_w = min(new_w, parent_rect.width() - self.x())
+            new_h = min(new_h, parent_rect.height() - self.y())
+
+            self.resize(new_w, new_h)
+            event.accept()
             return
 
-        # get legend items (symbols + label)
-        # prefer legendItemsV2 if available? we keep legendSymbolItems for compatibility
-        try:
-            if hasattr(renderer, "legendItemsV2"):
-                items = renderer.legendItemsV2()
-            else:
-                items = renderer.legendSymbolItems()
-        except Exception:
-            items = renderer.legendSymbolItems()
+        # drag
+        if self.header.geometry().contains(event.pos()):
 
-        # prepared helper lists
-        categories = self._get_renderer_categories(renderer)
-        ranges = self._get_renderer_ranges(renderer)
-        rules = self._get_rule_children(renderer)
+            newPos = event.globalPos() - self.dragPos
+            parent_rect = self.parent().rect()
+
+            x = max(
+                0,
+                min(newPos.x(), parent_rect.width() - self.width())
+            )
+
+            y = max(
+                0,
+                min(newPos.y(), parent_rect.height() - self.height())
+            )
+
+            self.move(x, y)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self.resizing = False
+
+    # ======================================================
+    # COUNT FEATURE
+    # ======================================================
+    def get_count(self, layer, renderer, idx):
 
         class_field = None
+
         if hasattr(renderer, "classAttribute"):
             try:
                 class_field = renderer.classAttribute()
-            except Exception:
-                class_field = None
+            except:
+                pass
 
-        # Clear existing legend
-        self.clear_layout(self.legend_container)
-
-        for idx, item in enumerate(items):
-            row = QHBoxLayout()
-            row.setSpacing(0)
-            row.setContentsMargins(0, 0, 0, 0)
-
-            # Render symbol image (safe)
-            try:
-                symbol = item.symbol()
-                img = symbol.asImage(QSize(14, 14))
-                pix = QPixmap.fromImage(img)
-            except Exception:
-                pix = QPixmap()
-
-            icon_label = QLabel()
-            icon_label.setPixmap(pix)
-            icon_label.setFixedSize(18, 18)
-            icon_label.setAlignment(Qt.AlignCenter)
-            row.addWidget(icon_label)
-
-            base_label = item.label() or ""
-            count = None
-
-            # 1) Categorized renderer (use category.filterExpression() if available)
+        # =====================================
+        # Categorized Renderer
+        # =====================================
+        try:
+            categories = renderer.categories()
             if categories and idx < len(categories):
-                cat = categories[idx]
-                # prefer filterExpression if available
-                filt = None
-                try:
-                    filt = cat.filterExpression() if hasattr(cat, "filterExpression") else None
-                except Exception:
-                    filt = None
+                val = categories[idx].value()
 
-                if filt:
-                    try:
-                        req = QgsFeatureRequest().setFilterExpression(filt)
-                        count = sum(1 for _ in layer.getFeatures(req))
-                    except Exception:
-                        count = None
+                if isinstance(val, str):
+                    expr = f'"{class_field}" = \'{val}\''
                 else:
-                    # fallback comparing attribute value
-                    try:
-                        val = cat.value() if hasattr(cat, "value") else None
-                        if val is None:
-                            # if label includes the value, try extract last token
-                            val = base_label
-                        expr = f'"{class_field}" = \'{val}\''
-                        req = QgsFeatureRequest().setFilterExpression(expr)
-                        count = sum(1 for _ in layer.getFeatures(req))
-                    except Exception:
-                        count = None
+                    expr = f'"{class_field}" = {val}'
 
-            # 2) Graduated renderer (use ranges list)
-            elif ranges and idx < len(ranges) and class_field:
-                rng = ranges[idx]
-                low, high = self._range_bounds(rng)
-                if low is not None and high is not None:
-                    # build expression: >= low AND < high (mimic QGIS)
-                    expr = f'"{class_field}" >= {low} AND "{class_field}" < {high}'
-                    try:
-                        req = QgsFeatureRequest().setFilterExpression(expr)
-                        count = sum(1 for _ in layer.getFeatures(req))
-                    except Exception:
-                        count = None
+                req = QgsFeatureRequest().setFilterExpression(expr)
+                return sum(1 for _ in layer.getFeatures(req))
+        except:
+            pass
 
-            # 3) Rule-based renderer (match rule label and use its filter)
-            elif rules:
-                matched = None
-                for r in rules:
-                    try:
-                        if r.label() == base_label:
-                            matched = r
-                            break
-                    except Exception:
-                        continue
-                if matched:
-                    try:
-                        filt = matched.filterExpression()
-                        req = QgsFeatureRequest().setFilterExpression(filt)
-                        count = sum(1 for _ in layer.getFeatures(req))
-                    except Exception:
-                        count = None
+        # =====================================
+        # Graduated Renderer
+        # =====================================
+        try:
+            ranges = renderer.ranges()
 
-            # 4) Fallback: total features
-            if count is None:
+            if ranges and idx < len(ranges):
+
+                r = ranges[idx]
+
+                low = r.lowerValue()
+                high = r.upperValue()
+
+                # class qgis default:
+                # lower inclusive, upper exclusive
+                expr = (
+                    f'"{class_field}" >= {low} '
+                    f'AND "{class_field}" < {high}'
+                )
+
+                req = QgsFeatureRequest().setFilterExpression(expr)
+
+                return sum(1 for _ in layer.getFeatures(req))
+        except:
+            pass
+
+        # =====================================
+        # Rule Based
+        # =====================================
+        try:
+            root = renderer.rootRule()
+            rules = root.children()
+
+            if rules and idx < len(rules):
+                rule = rules[idx]
+                expr = rule.filterExpression()
+
+                req = QgsFeatureRequest().setFilterExpression(expr)
+
+                return sum(1 for _ in layer.getFeatures(req))
+        except:
+            pass
+
+        # fallback
+        return layer.featureCount()
+
+    # ======================================================
+    # MULTI LEGEND
+    # ======================================================
+    def update_legend_multi(self, layers):
+
+        self.list_widget.clear()
+
+        self.label_title.setText("Legend") # f"{len(layers)} Layers"
+
+        for layer in layers:
+
+            sep = QListWidgetItem(f"{layer.name()}") #◆ 
+            f = sep.font()
+            f.setBold(True)
+            sep.setFont(f)
+            self.list_widget.addItem(sep)
+
+            renderer = layer.renderer()
+            if not renderer:
+                continue
+
+            try:
+                items = renderer.legendSymbolItems()
+            except:
+                continue
+
+            for idx, item in enumerate(items):
+
                 try:
-                    count = layer.featureCount()
-                except Exception:
-                    count = 0
+                    symbol = item.symbol()
+                    img = symbol.asImage(QSize(16,16))
+                    pix = QPixmap.fromImage(img)
+                    icon = QIcon(pix)
+                except:
+                    icon = QIcon()
 
-            # Compose final label with count (show 0 if none)
-            final_label = f"{base_label}  ({count})"
+                count = self.get_count(layer, renderer, idx)
+                txt = f"   {item.label()} ({count})"
 
-            text_label = QLabel(final_label)
-            text_label.setStyleSheet("font-size: 12px; margin-left: 6px; padding: 0px;")
-            row.addWidget(text_label)
-            row.addStretch()
-            self.legend_container.addLayout(row)
+                qitem = QListWidgetItem(icon, txt)
+                self.list_widget.addItem(qitem)
 
 
+# ==========================================================
+# MAIN PLUGIN
+# ==========================================================
 class LegendViewerPlugin:
+
     def __init__(self, iface):
         self.iface = iface
         self.action = None
-        self.dialog = None
+        self.overlay = None
 
         self.plugin_dir = os.path.dirname(__file__)
         self.icon_path = os.path.join(self.plugin_dir, "icon.png")
 
     def initGui(self):
-        icon = QIcon(self.icon_path)
-        self.action = QAction(icon, "Legend Viewer", self.iface.mainWindow())
+
+        self.action = QAction(
+            QIcon(self.icon_path),
+            "Legend Viewer",
+            self.iface.mainWindow()
+        )
+
         self.action.triggered.connect(self.show_legend)
 
         self.iface.addToolBarIcon(self.action)
         self.iface.addPluginToMenu("Legend Viewer", self.action)
 
-        # Auto refresh when active layer changes
-        self.iface.layerTreeView().currentLayerChanged.connect(self.on_layer_changed)
-
-        # Auto refresh when new layers added (fix delete-all case)
-        QgsProject.instance().layersAdded.connect(self.on_layers_added)
+        self.iface.layerTreeView().selectionModel().selectionChanged.connect(
+            self.on_selection_changed
+        )
 
     def unload(self):
+
         try:
             self.iface.removeToolBarIcon(self.action)
-            self.iface.removePluginToMenu("Legend Viewer", self.action)
-        except Exception:
+            self.iface.removePluginMenu("Legend Viewer", self.action)
+        except:
             pass
 
-    def reset_dialog(self):
-        self.dialog = None
+        if self.overlay:
+            self.overlay.close()
+            self.overlay = None
 
-    def on_layers_added(self, layers):
-        if self.dialog and layers:
-            self.dialog.update_legend(self.iface.activeLayer())
+    def on_selection_changed(self):
 
-    def on_layer_changed(self, layer):
-        if self.dialog and layer:
-            self.dialog.update_legend(layer)
+        if not self.overlay:
+            return
+
+        layers = self.iface.layerTreeView().selectedLayers()
+
+        if layers:
+            self.overlay.update_legend_multi(layers)
 
     def show_legend(self):
-        layer = self.iface.activeLayer()
-        if not layer:
-            self.iface.messageBar().pushWarning("Legend Viewer", "Tidak ada layer aktif.")
+
+        layers = self.iface.layerTreeView().selectedLayers()
+
+        if not layers:
+            self.iface.messageBar().pushWarning(
+                "Legend Viewer",
+                "Tidak ada layer dipilih."
+            )
             return
 
-        if self.dialog:
-            self.dialog.update_legend(layer)
-            self.dialog.raise_()
-            self.dialog.activateWindow()
+        if self.overlay:
+            self.overlay.show()
+            self.overlay.raise_()
+            self.overlay.update_legend_multi(layers)
             return
 
-        self.dialog = LegendDialog(layer)
-        self.dialog.finished.connect(self.reset_dialog)
-        self.dialog.show()
-        self.dialog.raise_()
-        self.dialog.activateWindow()
+        self.overlay = LegendOverlay(
+            self.iface.mapCanvas()
+        )
+
+        self.overlay.move(20,20)
+        self.overlay.show()
+        self.overlay.raise_()
+
+        self.overlay.update_legend_multi(layers)
