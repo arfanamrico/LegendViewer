@@ -6,8 +6,10 @@ from qgis.PyQt.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QHBoxLayout,
-    QListWidget,
-    QListWidgetItem
+    QScrollArea,
+    QGridLayout,
+    QSizePolicy,
+    QButtonGroup
 )
 from qgis.PyQt.QtGui import QIcon, QPixmap
 from qgis.PyQt.QtCore import Qt, QSize, QPoint
@@ -27,6 +29,8 @@ class LegendOverlay(QWidget):
         self.resizing = False
         self.resize_start_pos = QPoint()
         self.resize_start_size = self.size()
+        self.num_columns = 2
+        self._last_layers = []
 
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -39,14 +43,14 @@ class LegendOverlay(QWidget):
             }
         """)
 
-        self.resize(300, 400)
+        self.resize(400, 400)
         self.setMinimumSize(180, 150)
 
         # =========================
         # MAIN
         # =========================
         self.layout_main = QVBoxLayout(self)
-        self.layout_main.setContentsMargins(4,4,4,4)
+        self.layout_main.setContentsMargins(4, 4, 4, 4)
         self.layout_main.setSpacing(2)
 
         # =========================
@@ -59,9 +63,9 @@ class LegendOverlay(QWidget):
         """)
 
         h = QHBoxLayout(self.header)
-        h.setContentsMargins(6,4,4,4)
+        h.setContentsMargins(6, 4, 4, 4)
 
-        self.label_title = QLabel("Legend Viewer")
+        self.label_title = QLabel("Legend")
         self.label_title.setStyleSheet("""
             QLabel{
                 border:none;
@@ -71,8 +75,63 @@ class LegendOverlay(QWidget):
             }
         """)
 
+        # =========================
+        # TOMBOL PILIHAN KOLOM
+        # =========================
+        self.col_btn_group = QButtonGroup(self)
+        self.col_btn_group.setExclusive(True)
+
+        col_widget = QWidget()
+        col_widget.setStyleSheet("background:transparent; border:none;")
+        col_layout = QHBoxLayout(col_widget)
+        col_layout.setContentsMargins(0, 0, 0, 0)
+        col_layout.setSpacing(2)
+
+        btn_style_active = """
+            QPushButton{
+                background:#2980b9;
+                color:white;
+                border:none;
+                border-radius:3px;
+                font-size:10px;
+                font-weight:bold;
+                padding:2px 5px;
+            }
+        """
+        btn_style_inactive = """
+            QPushButton{
+                background:#bdc3c7;
+                color:#2c3e50;
+                border:none;
+                border-radius:3px;
+                font-size:10px;
+                padding:2px 5px;
+            }
+            QPushButton:hover{
+                background:#95a5a6;
+            }
+        """
+
+        for i, label in enumerate(["1", "2", "3", "4"]):
+            btn = QPushButton(label)
+            btn.setFixedSize(22, 20)
+            btn.setCheckable(True)
+            btn.setStyleSheet(
+                btn_style_active if i + 1 == self.num_columns else btn_style_inactive
+            )
+            btn.clicked.connect(
+                lambda checked, n=i + 1,
+                ba=btn_style_active,
+                bi=btn_style_inactive: self.on_col_changed(n, ba, bi)
+            )
+            self.col_btn_group.addButton(btn, i + 1)
+            col_layout.addWidget(btn)
+
+        # Set tombol default aktif (kolom 2)
+        self.col_btn_group.button(self.num_columns).setChecked(True)
+
         self.btn_close = QPushButton("✕")
-        self.btn_close.setFixedSize(20,20)
+        self.btn_close.setFixedSize(20, 20)
         self.btn_close.setStyleSheet("""
             QPushButton{
                 background:#e74c3c;
@@ -89,25 +148,40 @@ class LegendOverlay(QWidget):
 
         h.addWidget(self.label_title)
         h.addStretch()
+        h.addWidget(col_widget)
+        h.addSpacing(6)
         h.addWidget(self.btn_close)
 
         self.layout_main.addWidget(self.header)
 
         # =========================
-        # LIST
+        # SCROLL AREA + GRID
         # =========================
-        self.list_widget = QListWidget()
-        self.list_widget.setStyleSheet("""
-            QListWidget{
-                border:none;
-                background:white;
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                outline: none;
+                background: white;
             }
-            QListWidget::item{
-                height:24px;
-                padding-left:4px;
+            QWidget {
+                border: none;
+                outline: none;
             }
         """)
-        self.layout_main.addWidget(self.list_widget)
+
+        self.scroll_content = QWidget()
+        self.scroll_content.setStyleSheet("background:white;border:none;") ## bagian ini 
+
+        self.grid_layout = QGridLayout(self.scroll_content)
+        self.grid_layout.setContentsMargins(4, 4, 4, 4)
+        self.grid_layout.setHorizontalSpacing(12)
+        self.grid_layout.setVerticalSpacing(2)
+        self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+        self.scroll_area.setWidget(self.scroll_content)
+        self.layout_main.addWidget(self.scroll_area)
 
         # =========================
         # RESIZE HANDLE
@@ -116,7 +190,7 @@ class LegendOverlay(QWidget):
         b.addStretch()
 
         self.resize_handle = QLabel("◢")
-        self.resize_handle.setFixedSize(18,18)
+        self.resize_handle.setFixedSize(18, 18)
         self.resize_handle.setAlignment(Qt.AlignCenter)
         self.resize_handle.setCursor(Qt.SizeFDiagCursor)
         self.resize_handle.setStyleSheet("""
@@ -129,6 +203,25 @@ class LegendOverlay(QWidget):
 
         b.addWidget(self.resize_handle)
         self.layout_main.addLayout(b)
+
+    # ======================================================
+    # GANTI KOLOM
+    # ======================================================
+    def on_col_changed(self, n, btn_style_active, btn_style_inactive):
+
+        self.num_columns = n
+
+        # Update warna semua tombol
+        for i in range(1, 5):
+            btn = self.col_btn_group.button(i)
+            if btn:
+                btn.setStyleSheet(
+                    btn_style_active if i == n else btn_style_inactive
+                )
+
+        # Refresh legend dengan kolom baru
+        if self._last_layers:
+            self.update_legend_multi(self._last_layers)
 
     # ======================================================
     # DRAG / RESIZE
@@ -153,7 +246,6 @@ class LegendOverlay(QWidget):
         if not (event.buttons() & Qt.LeftButton):
             return
 
-        # resize
         if self.resizing:
 
             delta = event.globalPos() - self.resize_start_pos
@@ -169,7 +261,6 @@ class LegendOverlay(QWidget):
             )
 
             parent_rect = self.parent().rect()
-
             new_w = min(new_w, parent_rect.width() - self.x())
             new_h = min(new_h, parent_rect.height() - self.y())
 
@@ -177,21 +268,13 @@ class LegendOverlay(QWidget):
             event.accept()
             return
 
-        # drag
         if self.header.geometry().contains(event.pos()):
 
             newPos = event.globalPos() - self.dragPos
             parent_rect = self.parent().rect()
 
-            x = max(
-                0,
-                min(newPos.x(), parent_rect.width() - self.width())
-            )
-
-            y = max(
-                0,
-                min(newPos.y(), parent_rect.height() - self.height())
-            )
+            x = max(0, min(newPos.x(), parent_rect.width() - self.width()))
+            y = max(0, min(newPos.y(), parent_rect.height() - self.height()))
 
             self.move(x, y)
             event.accept()
@@ -212,68 +295,48 @@ class LegendOverlay(QWidget):
             except:
                 pass
 
-        # =====================================
-        # Categorized Renderer
-        # =====================================
+        # Categorized
         try:
             categories = renderer.categories()
             if categories and idx < len(categories):
                 val = categories[idx].value()
-
                 if isinstance(val, str):
                     expr = f'"{class_field}" = \'{val}\''
                 else:
                     expr = f'"{class_field}" = {val}'
-
                 req = QgsFeatureRequest().setFilterExpression(expr)
                 return sum(1 for _ in layer.getFeatures(req))
         except:
             pass
 
-        # =====================================
-        # Graduated Renderer
-        # =====================================
+        # Graduated
         try:
             ranges = renderer.ranges()
-
             if ranges and idx < len(ranges):
-
                 r = ranges[idx]
-
                 low = r.lowerValue()
                 high = r.upperValue()
-
-                # class qgis default:
-                # lower inclusive, upper exclusive
                 expr = (
                     f'"{class_field}" >= {low} '
                     f'AND "{class_field}" < {high}'
                 )
-
                 req = QgsFeatureRequest().setFilterExpression(expr)
-
                 return sum(1 for _ in layer.getFeatures(req))
         except:
             pass
 
-        # =====================================
         # Rule Based
-        # =====================================
         try:
             root = renderer.rootRule()
             rules = root.children()
-
             if rules and idx < len(rules):
                 rule = rules[idx]
                 expr = rule.filterExpression()
-
                 req = QgsFeatureRequest().setFilterExpression(expr)
-
                 return sum(1 for _ in layer.getFeatures(req))
         except:
             pass
 
-        # fallback
         return layer.featureCount()
 
     # ======================================================
@@ -281,17 +344,33 @@ class LegendOverlay(QWidget):
     # ======================================================
     def update_legend_multi(self, layers):
 
-        self.list_widget.clear()
+        self._last_layers = layers
 
-        self.label_title.setText("Legend") # f"{len(layers)} Layers"
+        # Bersihkan grid
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self.label_title.setText("Legend")
+
+        row = 0
 
         for layer in layers:
 
-            sep = QListWidgetItem(f"{layer.name()}") #◆ 
-            f = sep.font()
-            f.setBold(True)
-            sep.setFont(f)
-            self.list_widget.addItem(sep)
+            # Header nama layer
+            sep = QLabel(f"<b>{layer.name()}</b>")
+            sep.setStyleSheet("""
+                QLabel {
+                    background: #f0f0f0;
+                    border-radius: 3px;
+                    padding: 2px 4px;
+                    font-size: 11px;
+                }
+            """)
+            sep.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.grid_layout.addWidget(sep, row, 0, 1, self.num_columns)
+            row += 1
 
             renderer = layer.renderer()
             if not renderer:
@@ -302,21 +381,54 @@ class LegendOverlay(QWidget):
             except:
                 continue
 
+            col = 0
+
             for idx, item in enumerate(items):
 
                 try:
                     symbol = item.symbol()
-                    img = symbol.asImage(QSize(16,16))
+                    img = symbol.asImage(QSize(14, 14))
                     pix = QPixmap.fromImage(img)
-                    icon = QIcon(pix)
                 except:
-                    icon = QIcon()
+                    pix = QPixmap(14, 14)
+                    pix.fill(Qt.transparent)
 
                 count = self.get_count(layer, renderer, idx)
-                txt = f"   {item.label()} ({count})"
 
-                qitem = QListWidgetItem(icon, txt)
-                self.list_widget.addItem(qitem)
+                cell = QWidget()
+                cell.setStyleSheet("background:transparent;border:none; outline:none;") ### bagian ini
+                cell_layout = QHBoxLayout(cell)
+                cell_layout.setContentsMargins(2, 1, 2, 1)
+                cell_layout.setSpacing(4)
+
+                icon_label = QLabel()
+                icon_label.setPixmap(pix)
+                icon_label.setFixedSize(14, 14)
+                icon_label.setStyleSheet("background:transparent; border:none;")
+
+                text_label = QLabel(f"{item.label()} ({count})")
+                text_label.setStyleSheet("""
+                    QLabel {
+                        background: transparent;
+                        border: none;
+                        font-size: 10px;
+                    }
+                """)
+                text_label.setWordWrap(False)
+
+                cell_layout.addWidget(icon_label)
+                cell_layout.addWidget(text_label)
+                cell_layout.addStretch()
+
+                self.grid_layout.addWidget(cell, row, col)
+
+                col += 1
+                if col >= self.num_columns:
+                    col = 0
+                    row += 1
+
+            if col != 0:
+                row += 1
 
 
 # ==========================================================
@@ -392,7 +504,7 @@ class LegendViewerPlugin:
             self.iface.mapCanvas()
         )
 
-        self.overlay.move(20,20)
+        self.overlay.move(20, 20)
         self.overlay.show()
         self.overlay.raise_()
 
